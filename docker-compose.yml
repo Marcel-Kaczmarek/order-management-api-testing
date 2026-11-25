@@ -1,0 +1,57 @@
+# Local, isolated test environment for the application under test (AUT).
+# Never point the QA framework at a shared or production environment.
+name: orderflow-qa
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orderflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orderflow}
+      POSTGRES_DB: ${POSTGRES_DB:-orderflow}
+      QA_DB_READONLY_USER: ${DB_READONLY_USER:-qa_readonly}
+      QA_DB_READONLY_PASSWORD: ${DB_READONLY_PASSWORD:-qa_readonly}
+    ports:
+      - '${DB_PORT:-55432}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP (-h 127.0.0.1) on purpose: during first-time init the entrypoint runs a
+      # temporary socket-only server, which a socket check would report as ready.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./application-under-test
+      # QA packaging; build steps identical to upstream (see file header).
+      dockerfile: ../docker/aut.Dockerfile
+      # Forwarded only when set in the caller's shell (corporate proxies).
+      # Docker does not persist these predefined args in image history.
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+    image: orderflow-api:259c7d0
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-orderflow}:${POSTGRES_PASSWORD:-orderflow}@postgres:5432/${POSTGRES_DB:-orderflow}?schema=public
+      JWT_SECRET: ${JWT_SECRET:-local-qa-jwt-secret-not-for-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1d}
+    ports:
+      - '${API_PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/api/products?limit=1 >/dev/null || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+
+volumes:
+  postgres_data:

@@ -1,0 +1,13 @@
+node_modules
+application-under-test
+reports
+allure-results
+allure-report
+test-results
+playwright-report
+package-lock.json
+docs/screenshots
+postman/collections
+docs/requirements-traceability-matrix.md
+docs/test-catalog.md
+.env

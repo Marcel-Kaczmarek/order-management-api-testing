@@ -1,0 +1,109 @@
+name: API Tests
+
+# Pull-request functional pipeline against an ephemeral Docker Compose environment.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: api-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+  TEST_ENV: ci
+  # Local-only, throwaway credentials for the ephemeral container. Real secrets would
+  # come from GitHub Actions secrets, e.g. ${{ secrets.JWT_SECRET }}.
+  JWT_SECRET: ${{ secrets.JWT_SECRET || 'ci-ephemeral-jwt-secret-not-for-production' }}
+  TEST_WORKERS: 4
+  TEST_RETRIES: 1
+  FORCE_COLOR: 1
+
+jobs:
+  api-tests:
+    name: Smoke → API/Integration → Contract/Database
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Start AUT + PostgreSQL (waits for health checks)
+        run: docker compose up -d --build --wait
+
+      - name: Health check & seed reference data
+        run: npm run setup -- --skip-docker
+
+      # Fast gate: if the critical path is broken, skip the rest of the pipeline.
+      - name: Smoke tests (gate)
+        run: npx playwright test --grep @smoke --reporter=list
+
+      # One reporting run (HTML/JUnit/Allure/JSON) covering API, auth, integration,
+      # contract, database, security and negative tests. Heavy concurrency
+      # scenarios are reserved for the nightly pipeline.
+      - name: API, integration, contract & database tests
+        run: npx playwright test --grep-invert @concurrency
+
+      - name: Generate reports & metrics summary
+        if: always()
+        run: |
+          npx allure generate allure-results --output reports/allure-report || true
+          npm run report:summary || true
+          cat reports/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Publish JUnit results
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: reports/junit/results.xml
+          check_name: Playwright API tests
+          include_passed: false
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-reports
+          retention-days: 14
+          path: |
+            reports/playwright-html
+            reports/allure-report
+            reports/junit
+            reports/summary.md
+
+      - name: Collect container logs on failure
+        if: failure()
+        run: docker compose logs --no-color > reports/docker-compose.log 2>&1 || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-diagnostics
+          retention-days: 7
+          path: |
+            reports/test-results
+            reports/docker-compose.log
+
+      - name: Shut down environment
+        if: always()
+        run: docker compose down -v

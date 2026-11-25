@@ -1,0 +1,72 @@
+name: Performance Tests
+
+# Manually triggered; never part of PR validation. Runs only against the
+# isolated, ephemeral environment started inside the runner.
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: k6 profile
+        type: choice
+        options: [smoke, load, stress, spike]
+        default: smoke
+      p95_read_ms:
+        description: p95 threshold for read endpoints (ms)
+        default: '500'
+      p95_write_ms:
+        description: p95 threshold for write endpoints (ms)
+        default: '1000'
+
+permissions:
+  contents: read
+
+env:
+  JWT_SECRET: ${{ secrets.JWT_SECRET || 'ci-ephemeral-jwt-secret-not-for-production' }}
+
+jobs:
+  k6:
+    name: k6 ${{ inputs.scenario }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Start isolated environment
+        run: docker compose up -d --build --wait
+
+      - name: Health check & seed reference data
+        run: npm run setup -- --skip-docker
+
+      - uses: grafana/setup-k6-action@v1
+
+      - name: Run k6 (${{ inputs.scenario }}) – thresholds enforced
+        env:
+          BASE_URL: http://localhost:3000
+          P95_READ_MS: ${{ inputs.p95_read_ms }}
+          P95_WRITE_MS: ${{ inputs.p95_write_ms }}
+          SUMMARY_DIR: reports/performance
+        run: |
+          mkdir -p reports/performance
+          k6 run performance/${{ inputs.scenario }}.js
+
+      - name: Publish summary
+        if: always()
+        run: cat reports/performance/${{ inputs.scenario }}-summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-${{ inputs.scenario }}-results
+          path: reports/performance
+
+      - name: Shut down
+        if: always()
+        run: docker compose down -v

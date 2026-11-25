@@ -1,0 +1,80 @@
+name: Nightly Regression
+
+# Full regression, concurrency and local security suites + Postman/Newman.
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  CI: 'true'
+  TEST_ENV: ci
+  JWT_SECRET: ${{ secrets.JWT_SECRET || 'ci-ephemeral-jwt-secret-not-for-production' }}
+  TEST_WORKERS: 4
+  TEST_RETRIES: 1
+
+jobs:
+  regression:
+    name: Full regression + concurrency + security
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Start environment
+        run: docker compose up -d --build --wait
+
+      - name: Health check & seed
+        run: npm run setup -- --skip-docker
+
+      - name: Full Playwright suite (all tags, incl. concurrency & security)
+        run: npx playwright test
+
+      - name: Postman collection via Newman
+        if: success() || failure()
+        run: npm run test:postman
+
+      - name: Reports
+        if: always()
+        run: |
+          npx allure generate allure-results --output reports/allure-report || true
+          npm run report:summary || true
+          cat reports/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Publish JUnit results
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: |
+            reports/junit/results.xml
+            reports/newman/newman-junit.xml
+          check_name: Nightly regression
+
+      - name: Container logs
+        if: always()
+        run: docker compose logs --no-color > reports/docker-compose.log 2>&1 || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-regression-reports
+          retention-days: 30
+          path: |
+            reports/
+            !reports/json
+
+      - name: Shut down environment
+        if: always()
+        run: docker compose down -v
